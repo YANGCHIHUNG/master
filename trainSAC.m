@@ -45,10 +45,12 @@ if isprop(agentOpts, "CriticOptimizerOptions")
         end
         agentOpts.CriticOptimizerOptions = criticOpts;
     else
-        if isprop(criticOpts, "LearnRate")
-            criticOpts.LearnRate = Config.sac_critic_learn_rate;
-            agentOpts.CriticOptimizerOptions = criticOpts;
+        for idx = 1:numel(criticOpts)
+            if isprop(criticOpts(idx), "LearnRate")
+                criticOpts(idx).LearnRate = Config.sac_critic_learn_rate;
+            end
         end
+        agentOpts.CriticOptimizerOptions = criticOpts;
     end
 end
 

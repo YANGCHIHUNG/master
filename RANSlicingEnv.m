@@ -221,11 +221,15 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
             this.eMBBGroupQueues = max(0.0, this.eMBBGroupQueues);
 
             if initialURLLCBits <= 0
+                % No URLLC traffic this step
                 actualDelay = 0.0;
-            elseif remainingURLLCBits <= 0
-                actualDelay = (this.MiniSlotIndex + 1) * miniSlotDuration;
+            elseif remainingURLLCBits <= eps
+                % Agent successfully cleared the queue within this 1 mini-slot
+                actualDelay = miniSlotDuration;
             else
-                actualDelay = Config.tau_req + miniSlotDuration;
+                % Agent failed to clear the queue. Trigger soft penalty by exceeding tau_req
+                untransmittedRatio = remainingURLLCBits / max(initialURLLCBits, eps);
+                actualDelay = Config.tau_req + (untransmittedRatio * miniSlotDuration);
             end
 
             reward = calculateReward(actualDelay, Config.tau_req, embbRatesPerRB, this.eMBBQoS);

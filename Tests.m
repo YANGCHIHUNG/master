@@ -53,8 +53,8 @@ classdef Tests < matlab.unittest.TestCase
             testCase.verifyTrue(all(diff(mcs) >= 0));
         end
 
-        function testCalculateRewardDelayViolationReturnsZero(testCase)
-            %TESTCALCULATEREWARDDELAYVIOLATIONRETURNSZERO Enforce hard constraint.
+        function testCalculateRewardDelayViolationReturnsSoftPenalty(testCase)
+            %TESTCALCULATEREWARDDELAYVIOLATIONRETURNSSOFTPENALTY Check soft penalty.
 
             actualDelay = Config.tau_req * 2;
             reqDelay = Config.tau_req;
@@ -62,7 +62,8 @@ classdef Tests < matlab.unittest.TestCase
             embbQoS = [20e6; 20e6; 20e6];
 
             reward = calculateReward(actualDelay, reqDelay, embbRates, embbQoS);
-            testCase.verifyEqual(reward, 0.0);
+            expectedPenalty = -1.0 * ((actualDelay - reqDelay) / reqDelay);
+            testCase.verifyEqual(reward, expectedPenalty, "AbsTol", 1e-12);
         end
 
         function testCalculateRewardZeroRatesFairnessEdgeCase(testCase)

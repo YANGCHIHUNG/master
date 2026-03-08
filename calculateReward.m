@@ -9,11 +9,13 @@ function reward = calculateReward(actualDelay, reqDelay, embbRates, embbQoS)
 %   - embbQoS: Vector [N x 1] or [1 x N] of target eMBB QoS rates (bps).
 %
 %   Output:
-%   - reward: Scalar composite reward in [0, 1] under nominal conditions.
+%   - reward: Scalar reward. When delay is violated, reward is a negative
+%     soft penalty proportional to violation magnitude.
 %
 %   Reward definition:
-%   1) Hard URLLC latency constraint:
-%      if actualDelay > reqDelay, reward = 0.
+%   1) URLLC soft delay penalty:
+%      if actualDelay > reqDelay, reward = -((actualDelay-reqDelay)/reqDelay)
+%      and positive eMBB terms are skipped.
 %   2) eMBB satisfaction F_sat':
 %      x_i = min(1, r_i / QoS_i), F_sat' = mean(x_i).
 %   3) Jain fairness F_fair':
@@ -33,7 +35,8 @@ arguments
 end
 
 if actualDelay > reqDelay
-    reward = 0.0;
+    penalty = -1.0 * ((actualDelay - reqDelay) / reqDelay);
+    reward = penalty;
     return;
 end
 

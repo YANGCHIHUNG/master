@@ -1,0 +1,40 @@
+# MATLAB / Simulink
+*.asv
+*.m~
+*.autosave
+*.slx.autosave
+*.mdl.autosave
+*.slxc
+
+# Build / generated artifacts
+codegen/
+slprj/
+sfprj/
+*_rtw/
+simulink_cache/
+SimulinkCache/
+
+# MEX binaries
+*.mex*
+
+# MATLAB project local backup files
+*.prj.autosave
+*.prj.bak
+*.mlproj.bak
+
+# Crash and error logs
+matlab_crash_dump.*
+hs_err_pid*
+java_error_in_matlab*.log
+
+# Training / experiment outputs
+*models*/
+logs/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
