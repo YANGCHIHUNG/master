@@ -29,6 +29,10 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
     properties (Access = private)
         % Latest observation column vector, size [11 x 1].
         Observation
+        TraceURLLC
+        TraceeMBB
+        GlobalStepIndex
+        MaxTraceSteps
     end
 
     methods
@@ -57,6 +61,12 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
 
             this = this@rl.env.MATLABEnvironment(obsInfo, actInfo);
 
+            traceData = load("ChannelTraces.mat");
+            this.TraceURLLC = traceData.urllcChannelTrace;
+            this.TraceeMBB = traceData.embbChannelTrace;
+            this.MaxTraceSteps = size(this.TraceURLLC, 2);
+            this.GlobalStepIndex = randi([1, this.MaxTraceSteps]);
+
             % Initialize state for a fresh episode.
             this.Observation = reset(this);
         end
@@ -70,8 +80,7 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
             %     [q_u_G1..q_u_G5, q_e_G1..q_e_G5, m]^T.
             %
             %   Reset behavior:
-            %   1) Generate independent Rayleigh fading coefficients:
-            %      h = (x + 1i*y)/sqrt(2), x,y ~ N(0,1), then store |h|^2.
+            %   1) Read channel gains from offline trace by circular index.
             %   2) Draw random eMBB QoS uniformly in
             %      [Config.eMBB_QoS_min, Config.eMBB_QoS_max].
             %   3) Set grouped queues to zero and m = 0.
@@ -79,10 +88,9 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
 
             rbCount = Config.B_RBs;
 
-            hURLLC = (randn(rbCount, 1) + 1i * randn(rbCount, 1)) / sqrt(2);
-            heMBB = (randn(rbCount, 1) + 1i * randn(rbCount, 1)) / sqrt(2);
-            this.URLLCChannelGain = abs(hURLLC).^2;
-            this.eMBBChannelGain = abs(heMBB).^2;
+            safeIndex = mod(this.GlobalStepIndex - 1, this.MaxTraceSteps) + 1;
+            this.URLLCChannelGain = this.TraceURLLC(:, safeIndex);
+            this.eMBBChannelGain = this.TraceeMBB(:, safeIndex);
 
             qosSpan = Config.eMBB_QoS_max - Config.eMBB_QoS_min;
             this.eMBBQoS = Config.eMBB_QoS_min + qosSpan .* rand(rbCount, 1);
@@ -254,13 +262,13 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
             this.URLLCGroupQueues = this.URLLCGroupQueues + newURLLCPackets * Config.D_one;
 
             this.MiniSlotIndex = this.MiniSlotIndex + 1;
+            this.GlobalStepIndex = this.GlobalStepIndex + 1;
             isDone = this.MiniSlotIndex >= Config.M_mini_slots;
 
             if ~isDone
-                hURLLC = (randn(rbCount, 1) + 1i * randn(rbCount, 1)) / sqrt(2);
-                heMBB = (randn(rbCount, 1) + 1i * randn(rbCount, 1)) / sqrt(2);
-                this.URLLCChannelGain = abs(hURLLC).^2;
-                this.eMBBChannelGain = abs(heMBB).^2;
+                safeIndex = mod(this.GlobalStepIndex - 1, this.MaxTraceSteps) + 1;
+                this.URLLCChannelGain = this.TraceURLLC(:, safeIndex);
+                this.eMBBChannelGain = this.TraceeMBB(:, safeIndex);
             end
 
             this.eMBBRateHistory = [this.eMBBRateHistory; mean(embbRatesPerRB)];
