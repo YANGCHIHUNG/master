@@ -18,17 +18,22 @@ classdef Config
         B_RBs (1,1) double = 20
         M_mini_slots (1,1) double = 7
         Noise_Power (1,1) double = -114.0
+        Tx_Power_dBm (1,1) double = 30.0
+        Path_Loss_dB (1,1) double = 130.0
         Slot_duration (1,1) double = 1e-3
 
         % Traffic and QoS parameters
         % lambda_urllc (1,1) double = 3.0
         lambda_urllc (1,1) double = 0.5
-        D_one (1,1) double = 256
+        D_one (1,1) double = 64
         tau_req (1,1) double = 0.5e-3
-        % eMBB_QoS_min (1,1) double = 20e6
-        % eMBB_QoS_max (1,1) double = 50e6
-        eMBB_QoS_min (1,1) double = 10e6
-        eMBB_QoS_max (1,1) double = 30e6
+        lambda_embb (1,1) double = 0.05
+        embb_xm_bits (1,1) double = 2e6
+        embb_alpha (1,1) double = 1.2
+        embb_penalty_scale (1,1) double = 2e-7
+
+        % Simulation parameters
+        Max_Episode_Steps (1,1) double = 700
 
         % RL and state abstraction hyperparameters
         N_g (1,1) double = 5
@@ -47,6 +52,6 @@ classdef Config
         sac_critic_learn_rate (1,1) double = 1e-3
         train_max_episodes (1,1) double = 2000
         train_save_every_episodes (1,1) double = 500
-        train_save_dir (1,1) string = "models_v4_fix_late_counting"
+        train_save_dir (1,1) string = "models"
     end
 end

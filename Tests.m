@@ -5,12 +5,12 @@ classdef Tests < matlab.unittest.TestCase
 
     methods (Test)
         function testGroupUsersFixedBins(testCase)
-            %TESTGROUPUSERSFIXEDBINS Validate fixed MCS-to-group routing.
-            %   Uses a synthetic MCS vector and verifies each user index
+            %TESTGROUPUSERSFIXEDBINS Validate fixed CQI-to-group routing.
+            %   Uses a synthetic CQI vector and verifies each user index
             %   is routed to the expected quality group.
 
-            mcsArray = [25, 20, 13, 8, 2, 28, 18, 12, 6, 0, 24, 23, 17, 11, 5];
-            groups = ChannelStateProcessor.groupUsers(mcsArray);
+            cqiArray = [15, 10, 7, 4, 1, 12, 9, 6, 3, 0, 14, 11, 8, 5, 2];
+            groups = ChannelStateProcessor.groupUsers(cqiArray);
 
             testCase.verifyEqual(numel(groups), Config.N_g);
             testCase.verifyEqual(groups{1}, [1; 6; 11]);
@@ -38,32 +38,44 @@ classdef Tests < matlab.unittest.TestCase
             testCase.verifyLessThanOrEqual(qMid, Config.Q_levels - 1);
         end
 
-        function testSNRToMCSBoundsAndMonotonicity(testCase)
-            %TESTSNRTOMCSBOUNDSANDMONOTONICITY Check mapping safety.
-            %   Confirms output range [0, 28] and non-decreasing behavior
+        function testSNRToCQIBoundsAndMonotonicity(testCase)
+            %TESTSNRTOCQIBOUNDSANDMONOTONICITY Check mapping safety.
+            %   Confirms output range [0, 15] and non-decreasing behavior
             %   for increasing SNR inputs.
 
-            snr = [-20, -5, 0, 10, 25, 40];
-            mcs = ChannelStateProcessor.snrToMCS(snr);
+            snr = [-20, -6.7, 0, 10, 22.7, 40];
+            cqi = ChannelStateProcessor.snrToCQI(snr);
 
-            testCase.verifyGreaterThanOrEqual(min(mcs), 0);
-            testCase.verifyLessThanOrEqual(max(mcs), 28);
-            testCase.verifyEqual(mcs(1), 0);
-            testCase.verifyEqual(mcs(end), 28);
-            testCase.verifyTrue(all(diff(mcs) >= 0));
+            testCase.verifyGreaterThanOrEqual(min(cqi), 0);
+            testCase.verifyLessThanOrEqual(max(cqi), 15);
+            testCase.verifyEqual(cqi(1), 0);
+            testCase.verifyEqual(cqi(2), 1);
+            testCase.verifyEqual(cqi(end), 15);
+            testCase.verifyTrue(all(diff(cqi) >= 0));
+        end
+
+        function testCQIToEfficiencyLookup(testCase)
+            %TESTCQITOEFFICIENCYLOOKUP Validate 3GPP SE table endpoints.
+
+            efficiency = ChannelStateProcessor.cqiToEfficiency([0, 15]);
+
+            testCase.verifyEqual(efficiency(1), 0.0);
+            testCase.verifyEqual(efficiency(2), 5.5547, "AbsTol", 1e-12);
         end
 
         function testCalculateRewardDelayViolationReturnsSoftPenalty(testCase)
-            %TESTCALCULATEREWARDDELAYVIOLATIONRETURNSSOFTPENALTY Check soft penalty.
+            %TESTCALCULATEREWARDDELAYVIOLATIONRETURNSSOFTPENALTY Check new composite reward.
 
             actualDelay = Config.tau_req * 2;
             reqDelay = Config.tau_req;
             embbRates = [10e6; 15e6; 20e6];
-            embbQoS = [20e6; 20e6; 20e6];
+            embbQueueBits = [2e6; 1e6; 0.5e6];
 
-            reward = calculateReward(actualDelay, reqDelay, embbRates, embbQoS);
+            reward = calculateReward(actualDelay, reqDelay, embbRates, embbQueueBits);
             expectedPenalty = -1.0 * ((actualDelay - reqDelay) / reqDelay);
-            testCase.verifyEqual(reward, expectedPenalty, "AbsTol", 1e-12);
+            expectedReward = expectedPenalty ...
+                - Config.embb_penalty_scale * sum(embbQueueBits);
+            testCase.verifyEqual(reward, expectedReward, "AbsTol", 1e-12);
         end
 
         function testCalculateRewardZeroRatesFairnessEdgeCase(testCase)
@@ -74,9 +86,9 @@ classdef Tests < matlab.unittest.TestCase
             actualDelay = Config.tau_req * 0.5;
             reqDelay = Config.tau_req;
             embbRates = zeros(4, 1);
-            embbQoS = [10e6; 20e6; 30e6; 40e6];
+            embbQueueBits = zeros(4, 1);
 
-            reward = calculateReward(actualDelay, reqDelay, embbRates, embbQoS);
+            reward = calculateReward(actualDelay, reqDelay, embbRates, embbQueueBits);
 
             testCase.verifyTrue(isfinite(reward));
             testCase.verifyEqual(reward, 0.0);
@@ -88,19 +100,141 @@ classdef Tests < matlab.unittest.TestCase
             actualDelay = Config.tau_req * 0.8;
             reqDelay = Config.tau_req;
             embbRates = [10e6; 20e6];
-            embbQoS = [20e6; 20e6];
+            embbQueueBits = [2e6; 1e6];
 
-            reward = calculateReward(actualDelay, reqDelay, embbRates, embbQoS);
+            reward = calculateReward(actualDelay, reqDelay, embbRates, embbQueueBits);
 
-            x = [0.5; 1.0];
-            fSatExpected = mean(x);
-            fFairExpected = (sum(x) ^ 2) / (numel(x) * sum(x .^ 2));
-            fStaExpected = max(0.0, 1.0 - std(embbRates, 0) / mean(embbRates));
-            rewardExpected = Config.omega_1 * fSatExpected ...
-                + Config.omega_2 * fFairExpected ...
-                + Config.omega_3 * fStaExpected;
+            fFairExpected = (sum(embbRates) ^ 2) / ...
+                (numel(embbRates) * sum(embbRates .^ 2));
+            rewardExpected = ...
+                - Config.embb_penalty_scale * sum(embbQueueBits) ...
+                + 0.1 * fFairExpected;
 
             testCase.verifyEqual(reward, rewardExpected, "AbsTol", 1e-12);
+        end
+
+        function testCalculateRewardDelayViolationCannotBecomePositive(testCase)
+            %TESTCALCULATEREWARDDELAYVIOLATIONCANNOTBECOMEPOSITIVE Ensure fairness does not mask deadline misses.
+
+            actualDelay = 1.01 * Config.tau_req;
+            reward = calculateReward(actualDelay, Config.tau_req, [1; 1], 0);
+
+            testCase.verifyEqual(reward, -0.01, "AbsTol", 1e-12);
+            testCase.verifyLessThan(reward, 0.0);
+        end
+
+        function testStepUsesAllRBsWhenURLLCQueueIsEmpty(testCase)
+            %TESTSTEPUSESALLRBSWHENURLLCQUEUEISEMPTY Ensure eMBB uses all RBs without phantom URLLC interference.
+
+            env = RANSlicingEnv();
+            reset(env);
+
+            noisePowerLinear = 10 ^ (Config.Noise_Power / 10);
+            rxPowerFactor = 10 ^ ((Config.Tx_Power_dBm - Config.Path_Loss_dB) / 10);
+            snrDb = 10 * log10(rxPowerFactor / noisePowerLinear);
+            cqi = ChannelStateProcessor.snrToCQI(snrDb);
+            groupId = Tests.groupIdForCQI(cqi);
+            perRbBits = Config.W * ChannelStateProcessor.cqiToEfficiency(cqi) * ...
+                (Config.Slot_duration / Config.M_mini_slots);
+
+            env.URLLCGroupQueues = zeros(Config.N_g, 1);
+            env.eMBBGroupQueues = zeros(Config.N_g, 1);
+            env.eMBBGroupQueues(groupId) = 1e6;
+            env.URLLCChannelGain = ones(Config.B_RBs, 1);
+            env.eMBBChannelGain = ones(Config.B_RBs, 1);
+
+            seed = Tests.findSeedWithoutEmbbArrivals(200);
+            testCase.assertNotEmpty(seed, "Failed to find a seed without eMBB arrivals.");
+            rng(seed);
+
+            [~, ~, ~, logged] = step(env, ones(Config.N_g, 1));
+
+            expectedServedBits = Config.B_RBs * perRbBits;
+            servedBits = 1e6 - env.eMBBGroupQueues(groupId);
+            testCase.verifyEqual(servedBits, expectedServedBits, "AbsTol", 1e-9);
+            testCase.verifyEqual(logged.urllc_actual_delay, 0.0, "AbsTol", 1e-12);
+        end
+
+        function testStepTracksAgedURLLCDelay(testCase)
+            %TESTSTEPTRACKSAGEDURLLCDELAY Ensure old URLLC backlog reports aged delay when eventually served.
+
+            env = RANSlicingEnv();
+            seed = [];
+            zeroAction = zeros(Config.N_g, 1);
+
+            for candidate = 1:50
+                reset(env);
+                rng(candidate);
+                for stepIdx = 1:5
+                    step(env, zeroAction); %#ok<NASGU>
+                end
+                if sum(env.URLLCGroupQueues) > 0
+                    seed = candidate;
+                    break;
+                end
+            end
+
+            testCase.assertNotEmpty(seed, "Failed to find a seed with delayed URLLC backlog.");
+
+            reset(env);
+            rng(seed);
+            for stepIdx = 1:5
+                step(env, zeroAction); %#ok<NASGU>
+            end
+
+            testCase.verifyGreaterThan(sum(env.URLLCGroupQueues), 0.0);
+
+            env.URLLCChannelGain = ones(Config.B_RBs, 1);
+            env.eMBBChannelGain = 0.1 * ones(Config.B_RBs, 1);
+            [~, ~, ~, logged] = step(env, ones(Config.N_g, 1));
+
+            miniSlotDuration = Config.Slot_duration / Config.M_mini_slots;
+            testCase.verifyGreaterThan(logged.urllc_actual_delay, miniSlotDuration);
+            testCase.verifyGreaterThan(logged.urllc_actual_delay, Config.tau_req);
+        end
+
+        function testStepObservationUsesNormalizedState(testCase)
+            %TESTSTEPOBSERVATIONUSESNORMALIZEDSTATE Ensure returned observation matches normalized environment state.
+
+            env = RANSlicingEnv();
+            reset(env);
+            rng(7);
+
+            env.URLLCGroupQueues = [2500; 12500; 0; 500; 20000];
+            env.eMBBGroupQueues = [1e5; 5e6; 2.5e7; 0; 8e6];
+            env.MiniSlotIndex = 3;
+            env.URLLCChannelGain = linspace(0.2, 1.2, Config.B_RBs).';
+            env.eMBBChannelGain = linspace(1.2, 0.2, Config.B_RBs).';
+
+            [nextObservation, ~, ~, ~] = step(env, zeros(Config.N_g, 1));
+
+            expectedObservation = [
+                min(1.0, max(0.0, env.URLLCGroupQueues / 10000.0))
+                min(1.0, max(0.0, env.eMBBGroupQueues / 1e7))
+                min(1.0, max(0.0, env.MiniSlotIndex / Config.M_mini_slots))
+            ];
+
+            testCase.verifyEqual(nextObservation, expectedObservation, "AbsTol", 1e-12);
+            testCase.verifyGreaterThanOrEqual(min(nextObservation), 0.0);
+            testCase.verifyLessThanOrEqual(max(nextObservation), 1.0);
+        end
+    end
+
+    methods (Static, Access = private)
+        function seed = findSeedWithoutEmbbArrivals(maxSeeds)
+            seed = [];
+            for candidate = 1:maxSeeds
+                rng(candidate);
+                if all(rand(Config.N_g, 1) >= Config.lambda_embb)
+                    seed = candidate;
+                    return;
+                end
+            end
+        end
+
+        function groupId = groupIdForCQI(cqi)
+            groups = ChannelStateProcessor.groupUsers(cqi);
+            groupId = find(cellfun(@(idx) ~isempty(idx), groups), 1, "first");
         end
     end
 end

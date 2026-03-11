@@ -1,65 +1,51 @@
-function reward = calculateReward(actualDelay, reqDelay, embbRates, embbQoS)
-%CALCULATEREWARD Compute multi-objective reward for RAN slicing.
-%   reward = calculateReward(actualDelay, reqDelay, embbRates, embbQoS)
+function reward = calculateReward(actualDelay, reqDelay, embbRates, embbQueueBits)
+%CALCULATEREWARD Compute queue-aware reward for RAN slicing.
+%   reward = calculateReward(actualDelay, reqDelay, embbRates, embbQueueBits)
 %
 %   Inputs:
 %   - actualDelay: Scalar URLLC delay in seconds.
 %   - reqDelay: Scalar URLLC delay requirement in seconds.
 %   - embbRates: Vector [N x 1] or [1 x N] of achieved eMBB rates (bps).
-%   - embbQoS: Vector [N x 1] or [1 x N] of target eMBB QoS rates (bps).
+%   - embbQueueBits: Scalar or vector of remaining eMBB queue backlog (bits).
 %
 %   Output:
-%   - reward: Scalar reward. When delay is violated, reward is a negative
-%     soft penalty proportional to violation magnitude.
+%   - reward: Scalar reward composed of URLLC delay penalty, eMBB queue
+%     backlog penalty, and a small Jain fairness incentive.
 %
 %   Reward definition:
 %   1) URLLC soft delay penalty:
-%      if actualDelay > reqDelay, reward = -((actualDelay-reqDelay)/reqDelay)
-%      and positive eMBB terms are skipped.
-%   2) eMBB satisfaction F_sat':
-%      x_i = min(1, r_i / QoS_i), F_sat' = mean(x_i).
-%   3) Jain fairness F_fair':
-%      F_fair' = (sum(x_i)^2) / (N * sum(x_i^2)); if all rates are zero,
-%      F_fair' = 0.
-%   4) Stability F_sta':
-%      F_sta' = max(0, 1 - std(r)/mean(r)).
-%   5) Composite:
-%      reward = Config.omega_1*F_sat' + Config.omega_2*F_fair' + ...
-%               Config.omega_3*F_sta'.
+%      urllcReward = -((actualDelay-reqDelay)/reqDelay) when violated,
+%      otherwise 0.
+%   2) eMBB queue backlog penalty:
+%      embbQueuePenalty = -Config.embb_penalty_scale * sum(embbQueueBits).
+%   3) Jain fairness incentive on achieved eMBB rates:
+%      embbFairness = (sum(r)^2) / (N * sum(r.^2)); if all rates are zero,
+%      embbFairness = 0.
+%   4) Composite:
+%      reward = urllcReward + embbQueuePenalty when delay is violated,
+%      otherwise reward = embbQueuePenalty + 0.1 * embbFairness.
 
 arguments
     actualDelay (1,1) double
     reqDelay (1,1) double
     embbRates {mustBeNumeric, mustBeVector}
-    embbQoS {mustBeNumeric, mustBeVector}
+    embbQueueBits {mustBeNumeric}
 end
 
 if actualDelay > reqDelay
-    penalty = -1.0 * ((actualDelay - reqDelay) / reqDelay);
-    reward = penalty;
-    return;
+    urllcReward = -1.0 * ((actualDelay - reqDelay) / reqDelay);
+else
+    urllcReward = 0.0;
 end
 
 rates = max(0.0, double(embbRates(:)));
-qos = max(eps, double(embbQoS(:)));
-if numel(rates) ~= numel(qos)
-    error("calculateReward:SizeMismatch", ...
-        "embbRates and embbQoS must have identical lengths.");
-end
+queueBits = max(0.0, double(embbQueueBits(:)));
 
 if isempty(rates)
-    reward = 0.0;
-    return;
-end
-
-satisfactionRatios = min(1.0, rates ./ qos);
-fSat = mean(satisfactionRatios);
-
-if all(rates == 0)
     fFair = 0.0;
 else
-    numerator = sum(satisfactionRatios) ^ 2;
-    denominator = numel(satisfactionRatios) * sum(satisfactionRatios .^ 2);
+    numerator = sum(rates) ^ 2;
+    denominator = numel(rates) * sum(rates .^ 2);
     if denominator <= eps
         fFair = 0.0;
     else
@@ -67,16 +53,13 @@ else
     end
 end
 
-rateMean = mean(rates);
-if rateMean <= eps
-    fSta = 0.0;
-else
-    rateStd = std(rates, 0);
-    fSta = max(0.0, 1.0 - rateStd / rateMean);
-end
+embbQueuePenalty = -Config.embb_penalty_scale * sum(queueBits);
+embbQueuePenalty = max(-50.0, embbQueuePenalty);
 
-reward = Config.omega_1 * fSat ...
-    + Config.omega_2 * fFair ...
-    + Config.omega_3 * fSta;
+if actualDelay > reqDelay
+    reward = urllcReward + embbQueuePenalty;
+else
+    reward = embbQueuePenalty + 0.1 * fFair;
+end
 
 end
