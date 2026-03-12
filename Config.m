@@ -27,10 +27,10 @@ classdef Config
         lambda_urllc (1,1) double = 0.5
         D_one (1,1) double = 64
         tau_req (1,1) double = 0.5e-3
-        lambda_embb (1,1) double = 0.05
-        embb_xm_bits (1,1) double = 2e6
+        lambda_embb (1,1) double = 0.001
+        embb_xm_bits (1,1) double = 5e4
         embb_alpha (1,1) double = 1.2
-        embb_penalty_scale (1,1) double = 2e-7
+        embb_penalty_scale (1,1) double = 1e-6
 
         % Simulation parameters
         Max_Episode_Steps (1,1) double = 700

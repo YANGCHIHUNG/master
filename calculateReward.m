@@ -62,4 +62,7 @@ else
     reward = embbQueuePenalty + 0.1 * fFair;
 end
 
+% Scale reward to prevent gradient explosion in SAC neural networks
+reward = reward / 100.0;
+
 end
