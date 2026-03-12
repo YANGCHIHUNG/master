@@ -73,8 +73,10 @@ classdef Tests < matlab.unittest.TestCase
 
             reward = calculateReward(actualDelay, reqDelay, embbRates, embbQueueBits);
             expectedPenalty = -1.0 * ((actualDelay - reqDelay) / reqDelay);
-            expectedReward = expectedPenalty ...
-                - Config.embb_penalty_scale * sum(embbQueueBits);
+            expectedQueuePenalty = max( ...
+                -50.0, ...
+                -Config.embb_penalty_scale * sum(embbQueueBits));
+            expectedReward = (expectedPenalty + expectedQueuePenalty) / 100.0;
             testCase.verifyEqual(reward, expectedReward, "AbsTol", 1e-12);
         end
 
@@ -91,7 +93,7 @@ classdef Tests < matlab.unittest.TestCase
             reward = calculateReward(actualDelay, reqDelay, embbRates, embbQueueBits);
 
             testCase.verifyTrue(isfinite(reward));
-            testCase.verifyEqual(reward, 0.0);
+            testCase.verifyEqual(reward, 0.001, "AbsTol", 1e-12);
         end
 
         function testCalculateRewardNominalCase(testCase)
@@ -106,9 +108,10 @@ classdef Tests < matlab.unittest.TestCase
 
             fFairExpected = (sum(embbRates) ^ 2) / ...
                 (numel(embbRates) * sum(embbRates .^ 2));
-            rewardExpected = ...
-                - Config.embb_penalty_scale * sum(embbQueueBits) ...
-                + 0.1 * fFairExpected;
+            expectedQueuePenalty = max( ...
+                -50.0, ...
+                -Config.embb_penalty_scale * sum(embbQueueBits));
+            rewardExpected = (expectedQueuePenalty + 0.1 * fFairExpected) / 100.0;
 
             testCase.verifyEqual(reward, rewardExpected, "AbsTol", 1e-12);
         end
@@ -119,8 +122,47 @@ classdef Tests < matlab.unittest.TestCase
             actualDelay = 1.01 * Config.tau_req;
             reward = calculateReward(actualDelay, Config.tau_req, [1; 1], 0);
 
-            testCase.verifyEqual(reward, -0.01, "AbsTol", 1e-12);
+            testCase.verifyEqual(reward, -0.0001, "AbsTol", 1e-12);
             testCase.verifyLessThan(reward, 0.0);
+        end
+
+        function testResetRandomizesTraceStartWithinSafeBounds(testCase)
+            %TESTRESETRANDOMIZESTRACESTARTWITHINSAFEBOUNDS Verify reset picks a bounded random trace index.
+
+            env = RANSlicingEnv();
+            traceData = load("ChannelTraces.mat");
+            maxStartIndex = size(traceData.urllcChannelTrace, 2) - ...
+                Config.Max_Episode_Steps * Config.M_mini_slots - 1;
+
+            if maxStartIndex <= 1
+                rng(11);
+                reset(env);
+                testCase.verifyEqual(env.URLLCChannelGain, traceData.urllcChannelTrace(:, 1));
+                testCase.verifyEqual(env.eMBBChannelGain, traceData.embbChannelTrace(:, 1));
+                return;
+            end
+
+            firstSeed = 11;
+            secondSeed = 23;
+
+            rng(firstSeed);
+            expectedFirstIndex = randi([1, maxStartIndex]);
+            rng(firstSeed);
+            reset(env);
+            firstURLLCGain = env.URLLCChannelGain;
+            firstEMBBGain = env.eMBBChannelGain;
+
+            testCase.verifyEqual(firstURLLCGain, traceData.urllcChannelTrace(:, expectedFirstIndex));
+            testCase.verifyEqual(firstEMBBGain, traceData.embbChannelTrace(:, expectedFirstIndex));
+
+            rng(secondSeed);
+            expectedSecondIndex = randi([1, maxStartIndex]);
+            rng(secondSeed);
+            reset(env);
+
+            testCase.verifyEqual(env.URLLCChannelGain, traceData.urllcChannelTrace(:, expectedSecondIndex));
+            testCase.verifyEqual(env.eMBBChannelGain, traceData.embbChannelTrace(:, expectedSecondIndex));
+            testCase.verifyNotEqual(expectedFirstIndex, expectedSecondIndex);
         end
 
         function testStepUsesAllRBsWhenURLLCQueueIsEmpty(testCase)
@@ -209,8 +251,8 @@ classdef Tests < matlab.unittest.TestCase
             [nextObservation, ~, ~, ~] = step(env, zeros(Config.N_g, 1));
 
             expectedObservation = [
-                min(1.0, max(0.0, env.URLLCGroupQueues / 10000.0))
-                min(1.0, max(0.0, env.eMBBGroupQueues / 1e7))
+                min(1.0, max(0.0, log10(1.0 + env.URLLCGroupQueues) / 6.0))
+                min(1.0, max(0.0, log10(1.0 + env.eMBBGroupQueues) / 9.0))
                 min(1.0, max(0.0, env.MiniSlotIndex / Config.M_mini_slots))
             ];
 

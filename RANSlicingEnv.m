@@ -13,6 +13,9 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
         URLLCGroupQueues
         eMBBGroupQueues
 
+        % Runtime-overridable eMBB arrival rate for load stress tests.
+        lambda_embb (1,1) double = Config.lambda_embb
+
         % Channel power gains |h|^2 per RB, size [Config.B_RBs x 1].
         URLLCChannelGain
         eMBBChannelGain
@@ -86,6 +89,15 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
             %   2) Set grouped queues to zero and m = 1.
             %   3) Clear rate history buffer.
 
+            % Randomize trace starting point per episode to improve IID behavior.
+            episodeTraceSpan = Config.Max_Episode_Steps * Config.M_mini_slots;
+            maxStartIndex = this.MaxTraceSteps - episodeTraceSpan - 1;
+            if maxStartIndex > 1
+                this.GlobalStepIndex = randi([1, maxStartIndex]);
+            else
+                this.GlobalStepIndex = 1;
+            end
+
             safeIndex = mod(this.GlobalStepIndex - 1, this.MaxTraceSteps) + 1;
             this.URLLCChannelGain = this.TraceURLLC(:, safeIndex);
             this.eMBBChannelGain = this.TraceeMBB(:, safeIndex);
@@ -151,7 +163,7 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
 
             % 3GPP FTP3 bursty traffic arrivals for eMBB groups.
             for groupId = 1:Config.N_g
-                if rand() < Config.lambda_embb
+                if rand() < this.lambda_embb
                     fileSizeBits = this.sampleParetoBits( ...
                         Config.embb_xm_bits, ...
                         Config.embb_alpha);
@@ -174,6 +186,7 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
             initialURLLCBits = sum(this.URLLCGroupQueues);
             remainingURLLCBits = initialURLLCBits;
             embbActualRates = zeros(rbCount, 1);
+            embbGroupServedBits = zeros(Config.N_g, 1);
             maxURLLCDelay = 0.0;
 
             [~, sortedRBs] = sort(this.URLLCChannelGain, "descend");
@@ -227,10 +240,12 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
                 drainedEMBB = min(this.eMBBGroupQueues(groupId), embbBits);
                 this.eMBBGroupQueues(groupId) = this.eMBBGroupQueues(groupId) - drainedEMBB;
                 embbActualRates(rb) = drainedEMBB / miniSlotDuration;
+                embbGroupServedBits(groupId) = embbGroupServedBits(groupId) + drainedEMBB;
             end
 
             this.URLLCGroupQueues = max(0.0, this.URLLCGroupQueues);
             this.eMBBGroupQueues = max(0.0, this.eMBBGroupQueues);
+            embbGroupActualRates = embbGroupServedBits / miniSlotDuration;
 
             if initialURLLCBits <= 0
                 actualDelay = 0.0;
@@ -243,7 +258,7 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
             reward = calculateReward( ...
                 actualDelay, ...
                 Config.tau_req, ...
-                embbActualRates, ...
+                embbGroupActualRates, ...
                 this.eMBBGroupQueues);
 
             if isnan(reward) || isinf(reward)
@@ -267,11 +282,13 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
                 embbSatisfaction = 1.0;
             end
 
-            if all(embbActualRates == 0)
-                embbFairness = 0.0;
+            activeEmbbGroupIdx = this.eMBBGroupQueues > 0;
+            activeEmbbRates = embbGroupActualRates(activeEmbbGroupIdx);
+            if isempty(activeEmbbRates) || sum(activeEmbbRates) == 0
+                embbFairness = 1.0;
             else
-                fairnessDenominator = numel(embbActualRates) * sum(embbActualRates .^ 2);
-                embbFairness = (sum(embbActualRates) ^ 2) / max(fairnessDenominator, eps);
+                fairnessDenominator = numel(activeEmbbRates) * sum(activeEmbbRates .^ 2);
+                embbFairness = (sum(activeEmbbRates) ^ 2) / max(fairnessDenominator, eps);
             end
 
             isURLLCFailed = actualDelay > Config.tau_req;
@@ -305,8 +322,11 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
 
     methods (Access = private)
         function observation = buildObservation(this)
-            normalizedURLLCQueues = min(1.0, max(0.0, this.URLLCGroupQueues / 10000.0));
-            normalizedEMBBQueues = min(1.0, max(0.0, this.eMBBGroupQueues / 1e7));
+            % Use log scaling to preserve sensitivity under heavy-tailed traffic.
+            normalizedURLLCQueues = log10(1.0 + this.URLLCGroupQueues) / 6.0;
+            normalizedEMBBQueues = log10(1.0 + this.eMBBGroupQueues) / 9.0;
+            normalizedURLLCQueues = min(1.0, max(0.0, normalizedURLLCQueues));
+            normalizedEMBBQueues = min(1.0, max(0.0, normalizedEMBBQueues));
             normalizedMiniSlotIndex = min(1.0, max(0.0, ...
                 this.MiniSlotIndex / Config.M_mini_slots));
 
