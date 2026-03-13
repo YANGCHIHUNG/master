@@ -25,7 +25,9 @@ function reward = calculateReward(actualDelay, reqDelay, embbRates, embbQueueBit
 %      remain, fairness is set to 1.0 to reward perfect queue clearance.
 %   4) Composite:
 %      reward = urllcReward + embbQueuePenalty when delay is violated,
-%      otherwise reward = embbQueuePenalty + 0.1 * embbFairness.
+%      otherwise reward = embbQueuePenalty + Config.reward_fairness_weight * embbFairness.
+%   5) Final scaling: the composite reward is divided by Config.reward_scale
+%      so that the final reward magnitudes are stable for SAC training.
 
 arguments
     actualDelay (1,1) double
@@ -74,15 +76,17 @@ else
 end
 
 embbQueuePenalty = -Config.embb_penalty_scale * sum(queueBits);
-embbQueuePenalty = max(-50.0, embbQueuePenalty);
+    embbQueuePenalty = max(-50.0, embbQueuePenalty);
 
 if actualDelay > reqDelay
     reward = urllcReward + embbQueuePenalty;
 else
-    reward = embbQueuePenalty + 0.1 * fFair;
+    % Use configurable fairness weight from Config instead of magic 0.1
+    reward = embbQueuePenalty + Config.reward_fairness_weight * fFair;
 end
 
-% Scale reward to prevent gradient explosion in SAC neural networks
-reward = reward / 100.0;
+% Scale (or clip) reward using configurable divisor to keep magnitudes
+% suitable for SAC training. This replaces the previous hard-coded /100.
+reward = reward / Config.reward_scale;
 
 end

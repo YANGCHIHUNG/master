@@ -133,9 +133,9 @@ fprintf('Saved metrics               : %s\n', fullfile(pwd, 'Load_Evaluation_Res
 fprintf('===============================================================\n');
 
 function verifyFairnessFix()
-perfectReward = calculateReward(0.0, Config.tau_req, zeros(Config.N_g, 1), zeros(Config.N_g, 1));
-expectedPerfectReward = 0.1 / 100.0;
-assert(abs(perfectReward - expectedPerfectReward) <= 1e-12, ...
+    perfectReward = calculateReward(0.0, Config.tau_req, zeros(Config.N_g, 1), zeros(Config.N_g, 1));
+    expectedPerfectReward = Config.reward_fairness_weight / Config.reward_scale;
+    assert(abs(perfectReward - expectedPerfectReward) <= 1e-12, ...
     'evaluateLoad:FairnessFixMissing', ...
     'Reward fairness sanity check failed for perfectly cleared queues.');
 
@@ -143,7 +143,7 @@ testRates = [100.0; 1.0; 2.0];
 testQueues = [0.0; 10.0; 10.0];
 activeFairness = (sum([1.0; 2.0]) ^ 2) / (2 * sum([1.0; 2.0] .^ 2));
 queuePenalty = -Config.embb_penalty_scale * sum(testQueues);
-expectedReward = (queuePenalty + 0.1 * activeFairness) / 100.0;
+    expectedReward = (queuePenalty + Config.reward_fairness_weight * activeFairness) / Config.reward_scale;
 actualReward = calculateReward(0.0, Config.tau_req, testRates, testQueues);
 assert(abs(actualReward - expectedReward) <= 1e-12, ...
     'evaluateLoad:ActiveFairnessMismatch', ...

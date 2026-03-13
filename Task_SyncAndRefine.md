@@ -9,8 +9,9 @@
     ```matlab
     % Use Log10 normalization to handle heavy-tailed queue sizes without saturation blinding
     % Assuming max reasonable queue is around 10^9 bits (log10(10^9) = 9)
-    normalizedURLLC = log10(1 + this.URLLCGroupQueues) / 6.0; % Scale down max expected 10^6
-    normalizedEMBB = log10(1 + this.eMBBGroupQueues) / 9.0;  % Scale down max expected 10^9
+  % Prefer using Config constants to avoid magic numbers:
+  normalizedURLLC = log10(1 + this.URLLCGroupQueues) / Config.obs_urlllc_log_scale; % Scale down max expected queue
+  normalizedEMBB = log10(1 + this.eMBBGroupQueues) / Config.obs_embb_log_scale;  % Scale down max expected queue
     
     % Ensure strict [0, 1] bounds just in case of astronomical surges
     normalizedURLLC = min(1.0, max(0.0, normalizedURLLC));
@@ -39,8 +40,8 @@
 - [ ] **Step 3.1: Update `Tests.m`**
   - Open `Tests.m`.
   - Locate all `testReward...` functions (e.g., `testRewardDelayViolation`, `testRewardSatisfaction`).
-  - Update the expected logic in the assertions to match `calculateReward.m` (Remember: it uses `-embbQueueBits * Config.embb_penalty_scale`, adds `0.1 * fFair` if no delay violation, and divides the final result by `100.0`).
-  - Specifically, for empty queues and no violations, expected reward is `(0 + 0.1 * 1.0) / 100.0 = 0.001`.
+  - Update the expected logic in the assertions to match `calculateReward.m` (it uses `-embbQueueBits * Config.embb_penalty_scale`, adds `Config.reward_fairness_weight * fFair` if no delay violation, and divides the final result by `Config.reward_scale`).
+  - Specifically, for empty queues and no violations, expected reward is `(0 + Config.reward_fairness_weight * 1.0) / Config.reward_scale`.
 
 > 🛑 **Final Check Point:**
 > Run `matlab -batch "results = runtests('Tests.m'); assert(all([results.Passed]));"`. Ensure all tests pass.

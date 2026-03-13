@@ -142,11 +142,6 @@ end
 end
 
 function groupCounts = currentGroupCounts(env)
-noisePowerLinear = 10 ^ (Config.Noise_Power / 10);
-rxPowerFactor = 10 ^ ((Config.Tx_Power_dBm - Config.Path_Loss_dB) / 10);
-embbSNRLinear = (env.eMBBChannelGain .* rxPowerFactor) ./ max(noisePowerLinear, eps);
-embbSNRdB = 10 * log10(max(eps, embbSNRLinear));
-cqiPerRB = ChannelStateProcessor.snrToCQI(embbSNRdB);
-groupMembers = ChannelStateProcessor.groupUsers(cqiPerRB);
+groupMembers = ChannelStateProcessor.groupUsers(env.eMBBPRBCQI);
 groupCounts = cellfun(@numel, groupMembers(:)).';
 end

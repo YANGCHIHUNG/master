@@ -1,66 +1,12 @@
 classdef ChannelStateProcessor
     %CHANNELSTATEPROCESSOR Channel and queue abstraction utilities.
     %   This utility class provides:
-    %   1) SINR-to-CQI mapping for 3GPP style link abstraction.
-    %   2) CQI-to-spectral-efficiency mapping based on TS 38.214.
-    %   3) User grouping by CQI quality into Config.N_g groups.
-    %   3) Queue-length quantization for RL state compression.
+    %   1) User grouping by CQI quality into Config.N_g groups.
+    %   2) Queue-length quantization for RL state compression.
     %
     %   All methods are static and can be called without object creation.
 
     methods (Static)
-        function cqi = snrToCQI(snrDB)
-            %SNRTOCQI Map SNR in dB to CQI index in [0, 15].
-            %   cqi = ChannelStateProcessor.snrToCQI(snrDB)
-            %
-            %   Input:
-            %   - snrDB: Numeric scalar/vector/matrix of SNR values (dB).
-            %
-            %   Output:
-            %   - cqi: Same size as snrDB, integer-like double in
-            %     [0, 15], where 0 means outage / no supported CQI.
-            %
-            %   Notes:
-            %   - Thresholds approximate 10%% BLER switching points for
-            %     CQI 1..15 in 5G NR style link abstraction.
-
-            arguments
-                snrDB {mustBeNumeric}
-            end
-
-            thresholds = [-6.7, -4.7, -2.3, 0.2, 2.4, 4.3, 5.9, 8.1, ...
-                10.3, 11.7, 14.1, 16.3, 18.7, 21.0, 22.7];
-
-            snr = double(snrDB);
-            cqi = zeros(size(snr), "double");
-            for level = 1:numel(thresholds)
-                cqi(snr >= thresholds(level)) = level;
-            end
-        end
-
-        function efficiency = cqiToEfficiency(cqi)
-            %CQITOEFFICIENCY Map CQI index to 3GPP spectral efficiency.
-            %   efficiency = ChannelStateProcessor.cqiToEfficiency(cqi)
-            %
-            %   Input:
-            %   - cqi: Numeric scalar/vector/matrix of CQI values.
-            %
-            %   Output:
-            %   - efficiency: Same size as cqi in bps/Hz.
-
-            arguments
-                cqi {mustBeNumeric}
-            end
-
-            seTable = [0.0, 0.1523, 0.2344, 0.3770, 0.6016, 0.8770, ...
-                1.1758, 1.4766, 1.9141, 2.4063, 2.7305, 3.3223, ...
-                3.9023, 4.5234, 5.1152, 5.5547];
-
-            cqiIndex = round(double(cqi));
-            cqiIndex = max(0, min(15, cqiIndex));
-            efficiency = reshape(seTable(cqiIndex + 1), size(cqiIndex));
-        end
-
         function groups = groupUsers(cqiArray)
             %GROUPUSERS Partition users into fixed CQI quality groups.
             %   groups = ChannelStateProcessor.groupUsers(cqiArray)

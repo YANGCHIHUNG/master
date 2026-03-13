@@ -1,12 +1,16 @@
 classdef RANSlicingEnv < rl.env.MATLABEnvironment
     %RANSLICINGENV Custom RL environment for 5G RAN slicing.
-    %   This environment models one eMBB slot composed of
+    %   This environment models one NR slot composed of
     %   Config.M_mini_slots mini-slots. The observation is a column vector:
-    %   [u_G1..u_G5, e_G1..e_G5, m]^T with size [11 x 1], where each
-    %   component is normalized to a small numeric range for RL training.
+    %   [u_G1..u_G5, e_G1..e_G5, m, cqi_u, cqi_e]^T with size [13 x 1],
+    %   where each component is normalized to a small numeric range for
+    %   RL training.
     %
-    %   Observation and transition logic follow the project MDP
-    %   specification for mini-slot level control.
+    %   Phase-1 PHY integration replaces trace replay and Shannon-style
+    %   rates with:
+    %   1) 5G Toolbox TDL-C fading and scenario-based path loss.
+    %   2) Wideband CQI estimation per PRB.
+    %   3) CQI-driven MCS/TBS service for URLLC puncturing and eMBB.
 
     properties
         % Queue states in bits for grouped traffic, size [Config.N_g x 1].
@@ -16,9 +20,17 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
         % Runtime-overridable eMBB arrival rate for load stress tests.
         lambda_embb (1,1) double = Config.lambda_embb
 
-        % Channel power gains |h|^2 per RB, size [Config.B_RBs x 1].
+        % Effective post-pathloss signal power per RB, size [Config.B_RBs x 1].
         URLLCChannelGain
         eMBBChannelGain
+
+        % Latest PRB-wise CQI estimates for diagnostics and grouping.
+        URLLCPRBCQI
+        eMBBPRBCQI
+
+        % Latest wideband CQI summaries from NRPhyChannel.
+        URLLCWidebandCQI (1,1) double = 0
+        eMBBWidebandCQI (1,1) double = 0
 
         % Current cyclic mini-slot index in [1, Config.M_mini_slots].
         MiniSlotIndex (1,1) double = 1
@@ -28,12 +40,10 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
     end
 
     properties (Access = private)
-        % Latest observation column vector, size [11 x 1].
+        % Latest observation column vector, size [13 x 1].
         Observation
-        TraceURLLC
-        TraceeMBB
+        PhyChannel
         GlobalStepIndex
-        MaxTraceSteps
         CurrentStep
         URLLCPacketBits
         URLLCPacketArrivalSteps
@@ -44,104 +54,85 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
             %RANSLICINGENV Construct environment with action/observation specs.
             %   Action:
             %   - [Config.N_g x 1], continuous in [0, 1], representing
-            %     group-wise power allocation ratio theta_Gk.
+            %     group-wise URLLC puncturing quota theta_Gk.
             %
             %   Observation:
-            %   - [2*Config.N_g + 1 x 1], bounded in [0, 1], containing
-            %     normalized URLLC queues, normalized eMBB queues, and
-            %     normalized mini-slot index.
+            %   - [2*Config.N_g + 3 x 1], bounded in [0, 1], containing
+            %     normalized URLLC queues, normalized eMBB queues,
+            %     normalized mini-slot index, normalized URLLC CQI, and
+            %     normalized eMBB CQI.
 
             actInfo = rlNumericSpec([Config.N_g 1], ...
                 "LowerLimit", 0, ...
                 "UpperLimit", 1);
-            actInfo.Name = "group_power_ratio";
-            actInfo.Description = "theta for each channel-quality group";
+            actInfo.Name = "group_prb_quota";
+            actInfo.Description = "theta for group-wise URLLC puncturing quota";
 
-            obsDimension = 2 * Config.N_g + 1;
+            obsDimension = 2 * Config.N_g + 3;
             obsInfo = rlNumericSpec([obsDimension 1], ...
                 "LowerLimit", 0, ...
                 "UpperLimit", 1);
             obsInfo.Name = "queue_and_time_state";
-            obsInfo.Description = "normalized URLLC/eMBB queues and mini-slot index";
+            obsInfo.Description = ...
+                "normalized URLLC/eMBB queues, mini-slot index, URLLC CQI, and eMBB CQI";
 
             this = this@rl.env.MATLABEnvironment(obsInfo, actInfo);
-
-            traceData = load("ChannelTraces.mat");
-            this.TraceURLLC = traceData.urllcChannelTrace;
-            this.TraceeMBB = traceData.embbChannelTrace;
-            this.MaxTraceSteps = size(this.TraceURLLC, 2);
-            this.GlobalStepIndex = randi([1, this.MaxTraceSteps]);
+            this.PhyChannel = NRPhyChannel();
+            this.GlobalStepIndex = 0;
 
             % Initialize state for a fresh episode.
             this.Observation = reset(this);
         end
 
         function initialObservation = reset(this)
-            %RESET Start a new eMBB slot episode (1 ms).
+            %RESET Start a new NR slot episode using a fresh PHY realization.
             %   initialObservation = reset(this)
             %
             %   Output:
-            %   - initialObservation: [11 x 1] normalized column vector
-            %     [u_G1..u_G5, e_G1..e_G5, m]^T.
-            %
-            %   Reset behavior:
-            %   1) Read channel gains from offline trace by circular index.
-            %   2) Set grouped queues to zero and m = 1.
-            %   3) Clear rate history buffer.
-
-            % Randomize trace starting point per episode to improve IID behavior.
-            episodeTraceSpan = Config.Max_Episode_Steps * Config.M_mini_slots;
-            maxStartIndex = this.MaxTraceSteps - episodeTraceSpan - 1;
-            if maxStartIndex > 1
-                this.GlobalStepIndex = randi([1, maxStartIndex]);
-            else
-                this.GlobalStepIndex = 1;
-            end
-
-            safeIndex = mod(this.GlobalStepIndex - 1, this.MaxTraceSteps) + 1;
-            this.URLLCChannelGain = this.TraceURLLC(:, safeIndex);
-            this.eMBBChannelGain = this.TraceeMBB(:, safeIndex);
+            %   - initialObservation: [13 x 1] normalized column vector
+            %     [u_G1..u_G5, e_G1..e_G5, m, cqi_u, cqi_e]^T.
 
             this.URLLCGroupQueues = zeros(Config.N_g, 1);
             this.eMBBGroupQueues = zeros(Config.N_g, 1);
             this.MiniSlotIndex = 1;
             this.CurrentStep = 0;
+            this.GlobalStepIndex = 0;
             this.eMBBRateHistory = zeros(0, 1);
             this.URLLCPacketBits = cell(Config.N_g, 1);
             this.URLLCPacketArrivalSteps = cell(Config.N_g, 1);
+
+            this.PhyChannel.resetEpisode(randi([0, 2^31 - 1]));
+            initialMetrics = this.PhyChannel.stepChannel( ...
+                1, ...
+                this.MiniSlotIndex, ...
+                zeros(Config.N_g, 1), ...
+                false);
+            this.applyPhyMetrics(initialMetrics);
 
             initialObservation = this.buildObservation();
             this.Observation = initialObservation;
         end
 
         function [nextObservation, reward, isDone, loggedSignals] = step(this, action)
-            %STEP Apply group-wise power allocation and advance one mini-slot.
+            %STEP Apply group-wise PRB puncturing quota and advance one mini-slot.
             %   [nextObservation, reward, isDone, loggedSignals] = step(this, action)
             %
             %   Input:
-            %   - action: [Config.N_g x 1] vector of group-wise power ratios
-            %     theta_Gk in [0, 1].
+            %   - action: [Config.N_g x 1] vector of group-wise URLLC PRB
+            %     puncturing quotas theta_Gk in [0, 1].
             %
             %   Outputs:
-            %   - nextObservation: [11 x 1] normalized queue and mini-slot state.
+            %   - nextObservation: [13 x 1] normalized queue, time, and CQI state.
             %   - reward: Scalar reward from calculateReward().
             %   - isDone: Logical terminal flag, true when CurrentStep reaches
             %     Config.Max_Episode_Steps.
             %   - loggedSignals: Struct with:
             %       urllc_actual_delay, embb_satisfaction, embb_fairness,
-            %       is_urllc_failed.
-            %
-            %   NOMA/SIC clamping policy:
-            %   - If |h_u|^2 > |h_e|^2:
-            %       theta_raw >= 0.5 -> theta_b = 1.0
-            %       theta_raw <  0.5 -> theta_b = 0.0
-            %   - If |h_u|^2 <= |h_e|^2:
-            %       theta_raw > 0    -> theta_b = max(0.51, theta_raw)
-            %       theta_raw == 0   -> theta_b = 0.0
+            %       is_urllc_failed, and PHY diagnostics.
 
             actionVec = min(1.0, max(0.0, double(action(:))));
             if any(isnan(actionVec)) || any(isinf(actionVec))
-                fprintf('CRITICAL ERROR: Action contains NaN or Inf at Global Step %d!\n', ...
+                fprintf("CRITICAL ERROR: Action contains NaN or Inf at Global Step %d!\n", ...
                     this.GlobalStepIndex);
                 disp(actionVec');
             end
@@ -151,12 +142,9 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
             end
 
             this.CurrentStep = this.CurrentStep + 1;
+            this.GlobalStepIndex = this.GlobalStepIndex + 1;
 
-            rbCount = Config.B_RBs;
-            slotDuration = Config.Slot_duration;
-            miniSlotDuration = slotDuration / Config.M_mini_slots;
-            noisePowerLinear = 10 ^ (Config.Noise_Power / 10);
-            rxPowerFactor = 10 ^ ((Config.Tx_Power_dBm - Config.Path_Loss_dB) / 10);
+            miniSlotDuration = Config.Slot_duration / Config.M_mini_slots;
             currentServiceStep = this.CurrentStep;
 
             this.ensureURLLCPacketState();
@@ -172,74 +160,31 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
                 end
             end
 
-            % Map each RB to a channel-quality group using eMBB CQI.
-            embbSNRLinear = (this.eMBBChannelGain .* rxPowerFactor) ./ max(noisePowerLinear, eps);
-            embbSNRdB = 10 * log10(max(eps, embbSNRLinear));
-            cqiPerRB = ChannelStateProcessor.snrToCQI(embbSNRdB);
-            groupMembers = ChannelStateProcessor.groupUsers(cqiPerRB);
-
-            rbToGroup = ones(rbCount, 1) * Config.N_g;
-            for groupId = 1:Config.N_g
-                rbToGroup(groupMembers{groupId}) = groupId;
-            end
-
             initialURLLCBits = sum(this.URLLCGroupQueues);
-            remainingURLLCBits = initialURLLCBits;
-            embbActualRates = zeros(rbCount, 1);
+            phyMetrics = this.PhyChannel.stepChannel( ...
+                this.CurrentStep, ...
+                this.MiniSlotIndex, ...
+                actionVec, ...
+                initialURLLCBits > eps);
+            this.applyPhyMetrics(phyMetrics);
+
             embbGroupServedBits = zeros(Config.N_g, 1);
             maxURLLCDelay = 0.0;
 
-            [~, sortedRBs] = sort(this.URLLCChannelGain, "descend");
-            for idx = 1:rbCount
-                rb = sortedRBs(idx);
-                groupId = rbToGroup(rb);
-                thetaRaw = actionVec(groupId);
-                hub = this.URLLCChannelGain(rb) * rxPowerFactor;
-                heb = this.eMBBChannelGain(rb) * rxPowerFactor;
+            requestedURLLCBits = sum(phyMetrics.groupURLLCTBSBits);
+            if requestedURLLCBits > eps
+                [~, servedDelay] = this.serveURLLCBits( ...
+                    requestedURLLCBits, ...
+                    currentServiceStep, ...
+                    miniSlotDuration);
+                maxURLLCDelay = max(maxURLLCDelay, servedDelay);
+            end
 
-                thetaB = 0.0;
-                if remainingURLLCBits > eps
-                    if hub > heb
-                        if thetaRaw >= Config.sic_threshold
-                            thetaB = 1.0;
-                        else
-                            thetaB = 0.0;
-                        end
-                    else
-                        if thetaRaw > 0
-                            thetaB = max(Config.sic_min_superposition, thetaRaw);
-                        else
-                            thetaB = 0.0;
-                        end
-                    end
-                end
-
-                if thetaB > 0
-                    urllcSINR = (thetaB * hub) / (noisePowerLinear + (1 - thetaB) * hub + eps);
-                    urllcSINRdB = 10 * log10(max(eps, urllcSINR));
-                    urllcCQI = ChannelStateProcessor.snrToCQI(urllcSINRdB);
-                    urllcRate = Config.W * ChannelStateProcessor.cqiToEfficiency(urllcCQI);
-                    [servedURLLCBits, servedDelay] = this.serveURLLCBits( ...
-                        urllcRate * miniSlotDuration, ...
-                        currentServiceStep, ...
-                        miniSlotDuration);
-                    remainingURLLCBits = remainingURLLCBits - servedURLLCBits;
-                    maxURLLCDelay = max(maxURLLCDelay, servedDelay);
-                end
-
-                if thetaB > 0
-                    embbSINR = ((1 - thetaB) * heb) / (noisePowerLinear + thetaB * heb + eps);
-                else
-                    embbSINR = heb / (noisePowerLinear + eps);
-                end
-                embbSINRdB = 10 * log10(max(eps, embbSINR));
-                embbCQI = ChannelStateProcessor.snrToCQI(embbSINRdB);
-                embbRate = Config.W * ChannelStateProcessor.cqiToEfficiency(embbCQI);
-
-                embbBits = embbRate * miniSlotDuration;
-                drainedEMBB = min(this.eMBBGroupQueues(groupId), embbBits);
+            for groupId = 1:Config.N_g
+                drainedEMBB = min( ...
+                    this.eMBBGroupQueues(groupId), ...
+                    phyMetrics.groupEMBBTBSBits(groupId));
                 this.eMBBGroupQueues(groupId) = this.eMBBGroupQueues(groupId) - drainedEMBB;
-                embbActualRates(rb) = drainedEMBB / miniSlotDuration;
                 embbGroupServedBits(groupId) = embbGroupServedBits(groupId) + drainedEMBB;
             end
 
@@ -262,19 +207,21 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
                 this.eMBBGroupQueues);
 
             if isnan(reward) || isinf(reward)
-                fprintf('CRITICAL ERROR: Reward is %f at Global Step %d!\n', ...
+                fprintf("CRITICAL ERROR: Reward is %f at Global Step %d!\n", ...
                     reward, this.GlobalStepIndex);
             end
             if mod(this.CurrentStep, 200) == 0
                 fprintf(['[Env Heartbeat] Ep Step: %d | URLLC Q: %.1f | ' ...
-                    'eMBB Q: %.1f | Step Reward: %.4f\n'], ...
+                    'eMBB Q: %.1f | Reward: %.4f | CQI(U/E): %d/%d\n'], ...
                     this.CurrentStep, ...
                     sum(this.URLLCGroupQueues), ...
                     sum(this.eMBBGroupQueues), ...
-                    reward);
+                    reward, ...
+                    this.URLLCWidebandCQI, ...
+                    this.eMBBWidebandCQI);
             end
 
-            servedEmbbBits = sum(embbActualRates) * miniSlotDuration;
+            servedEmbbBits = sum(embbGroupServedBits);
             totalEmbbQueue = sum(this.eMBBGroupQueues) + servedEmbbBits;
             if totalEmbbQueue > 0
                 embbSatisfaction = servedEmbbBits / totalEmbbQueue;
@@ -296,22 +243,18 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
                 "urllc_actual_delay", actualDelay, ...
                 "embb_satisfaction", embbSatisfaction, ...
                 "embb_fairness", embbFairness, ...
-                "is_urllc_failed", isURLLCFailed);
+                "is_urllc_failed", isURLLCFailed, ...
+                "urllc_wideband_cqi", this.URLLCWidebandCQI, ...
+                "embb_wideband_cqi", this.eMBBWidebandCQI, ...
+                "urllc_tbs_bits", sum(phyMetrics.groupURLLCTBSBits), ...
+                "embb_tbs_bits", sum(phyMetrics.groupEMBBTBSBits));
 
             newURLLCPackets = this.samplePoisson(Config.lambda_urllc, Config.N_g, 1);
             this.addURLLCPackets(newURLLCPackets, currentServiceStep + 1);
 
-            this.GlobalStepIndex = this.GlobalStepIndex + 1;
             isDone = this.CurrentStep >= Config.Max_Episode_Steps;
             this.MiniSlotIndex = mod(this.CurrentStep, Config.M_mini_slots) + 1;
-
-            if ~isDone
-                safeIndex = mod(this.GlobalStepIndex - 1, this.MaxTraceSteps) + 1;
-                this.URLLCChannelGain = this.TraceURLLC(:, safeIndex);
-                this.eMBBChannelGain = this.TraceeMBB(:, safeIndex);
-            end
-
-            this.eMBBRateHistory = [this.eMBBRateHistory; mean(embbActualRates)];
+            this.eMBBRateHistory = [this.eMBBRateHistory; mean(embbGroupActualRates)];
 
             nextObservation = this.buildObservation();
             this.Observation = nextObservation;
@@ -321,19 +264,33 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
     end
 
     methods (Access = private)
+        function applyPhyMetrics(this, phyMetrics)
+            this.URLLCChannelGain = phyMetrics.urllcSignalPowerPerRB(:);
+            this.eMBBChannelGain = phyMetrics.embbSignalPowerPerRB(:);
+            this.URLLCPRBCQI = phyMetrics.urllcCQIPerRB(:);
+            this.eMBBPRBCQI = phyMetrics.embbCQIPerRB(:);
+            this.URLLCWidebandCQI = phyMetrics.urllcWidebandCQI;
+            this.eMBBWidebandCQI = phyMetrics.embbWidebandCQI;
+        end
+
         function observation = buildObservation(this)
-            % Use log scaling to preserve sensitivity under heavy-tailed traffic.
-            normalizedURLLCQueues = log10(1.0 + this.URLLCGroupQueues) / 6.0;
-            normalizedEMBBQueues = log10(1.0 + this.eMBBGroupQueues) / 9.0;
+            % Use configurable normalization constants from Config to avoid
+            % hard-coded magic numbers and allow easy tuning.
+            normalizedURLLCQueues = log10(1.0 + this.URLLCGroupQueues) / Config.obs_urlllc_log_scale;
+            normalizedEMBBQueues = log10(1.0 + this.eMBBGroupQueues) / Config.obs_embb_log_scale;
             normalizedURLLCQueues = min(1.0, max(0.0, normalizedURLLCQueues));
             normalizedEMBBQueues = min(1.0, max(0.0, normalizedEMBBQueues));
             normalizedMiniSlotIndex = min(1.0, max(0.0, ...
                 this.MiniSlotIndex / Config.M_mini_slots));
+            normalizedURLLCCQI = min(1.0, max(0.0, this.URLLCWidebandCQI / 15.0));
+            normalizedEMBBCQI = min(1.0, max(0.0, this.eMBBWidebandCQI / 15.0));
 
             observation = [
                 normalizedURLLCQueues
                 normalizedEMBBQueues
                 normalizedMiniSlotIndex
+                normalizedURLLCCQI
+                normalizedEMBBCQI
             ];
         end
 
@@ -457,9 +414,6 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
 
     methods (Static, Access = private)
         function sample = sampleParetoBits(xm, alpha)
-            %SAMPLEPARETOBITS Draw a Pareto-distributed file size in bits.
-            %   Uses inverse transform sampling to avoid toolbox dependence.
-
             if xm <= 0 || alpha <= 0
                 error("RANSlicingEnv:InvalidParetoParameters", ...
                     "Pareto parameters xm and alpha must be positive.");
@@ -471,11 +425,6 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
         end
 
         function samples = samplePoisson(lambda, rows, cols)
-            %SAMPLEPOISSON Draw Poisson samples with toolbox fallback.
-            %   samples = samplePoisson(lambda, rows, cols) returns a
-            %   [rows x cols] matrix. Uses poissrnd if available, otherwise
-            %   uses Knuth's algorithm for scalar lambda.
-
             if exist("poissrnd", "file") == 2
                 samples = poissrnd(lambda, rows, cols);
                 return;

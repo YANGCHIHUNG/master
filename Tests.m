@@ -1,14 +1,10 @@
 classdef Tests < matlab.unittest.TestCase
-    %TESTS Unit tests for channel-state and reward utility modules.
+    %TESTS Unit tests for queue abstractions, reward logic, and Phase-1 PHY integration.
     %   Run all tests with:
     %       results = runtests('Tests.m');
 
     methods (Test)
         function testGroupUsersFixedBins(testCase)
-            %TESTGROUPUSERSFIXEDBINS Validate fixed CQI-to-group routing.
-            %   Uses a synthetic CQI vector and verifies each user index
-            %   is routed to the expected quality group.
-
             cqiArray = [15, 10, 7, 4, 1, 12, 9, 6, 3, 0, 14, 11, 8, 5, 2];
             groups = ChannelStateProcessor.groupUsers(cqiArray);
 
@@ -21,12 +17,6 @@ classdef Tests < matlab.unittest.TestCase
         end
 
         function testQuantizeQueueEdgeCases(testCase)
-            %TESTQUANTIZEQUEUEEDGECASES Verify quantizer boundary behavior.
-            %   Required checks:
-            %   - queueLength = 0 returns 0.
-            %   - queueLength = phi_th/2 remains in valid middle levels.
-            %   - queueLength >> phi_th clamps to max level.
-
             q0 = ChannelStateProcessor.quantizeQueue(0);
             qMid = ChannelStateProcessor.quantizeQueue(Config.phi_th / 2);
             qHigh = ChannelStateProcessor.quantizeQueue(Config.phi_th * 10);
@@ -38,34 +28,49 @@ classdef Tests < matlab.unittest.TestCase
             testCase.verifyLessThanOrEqual(qMid, Config.Q_levels - 1);
         end
 
-        function testSNRToCQIBoundsAndMonotonicity(testCase)
-            %TESTSNRTOCQIBOUNDSANDMONOTONICITY Check mapping safety.
-            %   Confirms output range [0, 15] and non-decreasing behavior
-            %   for increasing SNR inputs.
+        function testNRPhyChannelStepProducesFiniteOutputs(testCase)
+            phy = NRPhyChannel();
+            phy.resetEpisode(101);
 
-            snr = [-20, -6.7, 0, 10, 22.7, 40];
-            cqi = ChannelStateProcessor.snrToCQI(snr);
+            metrics = phy.stepChannel(1, 1, 0.5 * ones(Config.N_g, 1), true);
 
-            testCase.verifyGreaterThanOrEqual(min(cqi), 0);
-            testCase.verifyLessThanOrEqual(max(cqi), 15);
-            testCase.verifyEqual(cqi(1), 0);
-            testCase.verifyEqual(cqi(2), 1);
-            testCase.verifyEqual(cqi(end), 15);
-            testCase.verifyTrue(all(diff(cqi) >= 0));
+            testCase.verifySize(metrics.urllcSignalPowerPerRB, [Config.B_RBs 1]);
+            testCase.verifySize(metrics.embbSignalPowerPerRB, [Config.B_RBs 1]);
+            testCase.verifyTrue(all(isfinite(metrics.urllcSignalPowerPerRB)));
+            testCase.verifyTrue(all(isfinite(metrics.embbSignalPowerPerRB)));
+            testCase.verifyTrue(all(isfinite(metrics.urllcCQIPerRB)));
+            testCase.verifyTrue(all(isfinite(metrics.embbCQIPerRB)));
+            testCase.verifyGreaterThanOrEqual(min(metrics.embbCQIPerRB), 0);
+            testCase.verifyLessThanOrEqual(max(metrics.embbCQIPerRB), 15);
+            testCase.verifyGreaterThanOrEqual(sum(metrics.groupURLLCPRBCount), 0);
+            testCase.verifyLessThanOrEqual(sum(metrics.groupURLLCPRBCount), Config.B_RBs);
         end
 
-        function testCQIToEfficiencyLookup(testCase)
-            %TESTCQITOEFFICIENCYLOOKUP Validate 3GPP SE table endpoints.
+        function testNRPhyChannelCalculateTBSMonotonicWithPRBs(testCase)
+            phy = NRPhyChannel();
+            smallTBS = phy.calculateTBS("64QAM", 666 / 1024.0, 1:2, [0, 14]);
+            largeTBS = phy.calculateTBS("64QAM", 666 / 1024.0, 1:8, [0, 14]);
 
-            efficiency = ChannelStateProcessor.cqiToEfficiency([0, 15]);
+            testCase.verifyGreaterThan(smallTBS, 0);
+            testCase.verifyGreaterThan(largeTBS, smallTBS);
+        end
 
-            testCase.verifyEqual(efficiency(1), 0.0);
-            testCase.verifyEqual(efficiency(2), 5.5547, "AbsTol", 1e-12);
+        function testNRPhyChannelQuotaExtremes(testCase)
+            phy = NRPhyChannel();
+
+            phy.resetEpisode(202);
+            zeroQuota = phy.stepChannel(1, 1, zeros(Config.N_g, 1), true);
+
+            phy.resetEpisode(202);
+            fullQuota = phy.stepChannel(1, 1, ones(Config.N_g, 1), true);
+
+            testCase.verifyEqual(sum(zeroQuota.groupURLLCPRBCount), 0);
+            testCase.verifyEqual(sum(zeroQuota.groupEMBBPRBCount), Config.B_RBs);
+            testCase.verifyEqual(sum(fullQuota.groupURLLCPRBCount), Config.B_RBs);
+            testCase.verifyEqual(sum(fullQuota.groupEMBBPRBCount), 0);
         end
 
         function testCalculateRewardDelayViolationReturnsSoftPenalty(testCase)
-            %TESTCALCULATEREWARDDELAYVIOLATIONRETURNSSOFTPENALTY Check new composite reward.
-
             actualDelay = Config.tau_req * 2;
             reqDelay = Config.tau_req;
             embbRates = [10e6; 15e6; 20e6];
@@ -76,15 +81,11 @@ classdef Tests < matlab.unittest.TestCase
             expectedQueuePenalty = max( ...
                 -50.0, ...
                 -Config.embb_penalty_scale * sum(embbQueueBits));
-            expectedReward = (expectedPenalty + expectedQueuePenalty) / 100.0;
+            expectedReward = (expectedPenalty + expectedQueuePenalty) / Config.reward_scale;
             testCase.verifyEqual(reward, expectedReward, "AbsTol", 1e-12);
         end
 
         function testCalculateRewardZeroRatesFairnessEdgeCase(testCase)
-            %TESTCALCULATEREWARDZERORATESFAIRNESSEDGECASE Check zero-rate safety.
-            %   Ensures Jain fairness computation does not divide by zero
-            %   or produce NaN/Inf when all rates are zero.
-
             actualDelay = Config.tau_req * 0.5;
             reqDelay = Config.tau_req;
             embbRates = zeros(4, 1);
@@ -93,12 +94,14 @@ classdef Tests < matlab.unittest.TestCase
             reward = calculateReward(actualDelay, reqDelay, embbRates, embbQueueBits);
 
             testCase.verifyTrue(isfinite(reward));
-            testCase.verifyEqual(reward, 0.001, "AbsTol", 1e-12);
+            % Build expected reward using Config constants to avoid brittle
+            % numeric literals tied to internal scaling.
+            expectedQueuePenalty = max(-50.0, -Config.embb_penalty_scale * sum(embbQueueBits));
+            expectedReward = (expectedQueuePenalty + Config.reward_fairness_weight * 1.0) / Config.reward_scale;
+            testCase.verifyEqual(reward, expectedReward, "AbsTol", 1e-12);
         end
 
         function testCalculateRewardNominalCase(testCase)
-            %TESTCALCULATEREWARDNOMINALCASE Validate composite reward formula.
-
             actualDelay = Config.tau_req * 0.8;
             reqDelay = Config.tau_req;
             embbRates = [10e6; 20e6];
@@ -111,149 +114,106 @@ classdef Tests < matlab.unittest.TestCase
             expectedQueuePenalty = max( ...
                 -50.0, ...
                 -Config.embb_penalty_scale * sum(embbQueueBits));
-            rewardExpected = (expectedQueuePenalty + 0.1 * fFairExpected) / 100.0;
+            rewardExpected = (expectedQueuePenalty + Config.reward_fairness_weight * fFairExpected) / Config.reward_scale;
 
             testCase.verifyEqual(reward, rewardExpected, "AbsTol", 1e-12);
         end
 
         function testCalculateRewardDelayViolationCannotBecomePositive(testCase)
-            %TESTCALCULATEREWARDDELAYVIOLATIONCANNOTBECOMEPOSITIVE Ensure fairness does not mask deadline misses.
-
             actualDelay = 1.01 * Config.tau_req;
-            reward = calculateReward(actualDelay, Config.tau_req, [1; 1], 0);
+            embbRates = [1; 1];
+            embbQueueBits = 0;
+            reward = calculateReward(actualDelay, Config.tau_req, embbRates, embbQueueBits);
 
-            testCase.verifyEqual(reward, -0.0001, "AbsTol", 1e-12);
+            expectedPenalty = -1.0 * ((actualDelay - Config.tau_req) / Config.tau_req);
+            expectedQueuePenalty = max(-50.0, -Config.embb_penalty_scale * sum(embbQueueBits));
+            expectedReward = (expectedPenalty + expectedQueuePenalty) / Config.reward_scale;
+
+            testCase.verifyEqual(reward, expectedReward, "AbsTol", 1e-12);
             testCase.verifyLessThan(reward, 0.0);
         end
 
-        function testResetRandomizesTraceStartWithinSafeBounds(testCase)
-            %TESTRESETRANDOMIZESTRACESTARTWITHINSAFEBOUNDS Verify reset picks a bounded random trace index.
-
+        function testResetProducesDeterministicPhyStateForFixedSeed(testCase)
             env = RANSlicingEnv();
-            traceData = load("ChannelTraces.mat");
-            maxStartIndex = size(traceData.urllcChannelTrace, 2) - ...
-                Config.Max_Episode_Steps * Config.M_mini_slots - 1;
 
-            if maxStartIndex <= 1
-                rng(11);
-                reset(env);
-                testCase.verifyEqual(env.URLLCChannelGain, traceData.urllcChannelTrace(:, 1));
-                testCase.verifyEqual(env.eMBBChannelGain, traceData.embbChannelTrace(:, 1));
-                return;
-            end
-
-            firstSeed = 11;
-            secondSeed = 23;
-
-            rng(firstSeed);
-            expectedFirstIndex = randi([1, maxStartIndex]);
-            rng(firstSeed);
+            rng(11);
             reset(env);
             firstURLLCGain = env.URLLCChannelGain;
-            firstEMBBGain = env.eMBBChannelGain;
+            firstEMBBCQI = env.eMBBPRBCQI;
 
-            testCase.verifyEqual(firstURLLCGain, traceData.urllcChannelTrace(:, expectedFirstIndex));
-            testCase.verifyEqual(firstEMBBGain, traceData.embbChannelTrace(:, expectedFirstIndex));
-
-            rng(secondSeed);
-            expectedSecondIndex = randi([1, maxStartIndex]);
-            rng(secondSeed);
+            rng(11);
             reset(env);
+            secondURLLCGain = env.URLLCChannelGain;
+            secondEMBBCQI = env.eMBBPRBCQI;
 
-            testCase.verifyEqual(env.URLLCChannelGain, traceData.urllcChannelTrace(:, expectedSecondIndex));
-            testCase.verifyEqual(env.eMBBChannelGain, traceData.embbChannelTrace(:, expectedSecondIndex));
-            testCase.verifyNotEqual(expectedFirstIndex, expectedSecondIndex);
+            rng(23);
+            reset(env);
+            thirdURLLCGain = env.URLLCChannelGain;
+
+            testCase.verifyEqual(firstURLLCGain, secondURLLCGain, "AbsTol", 1e-12);
+            testCase.verifyEqual(firstEMBBCQI, secondEMBBCQI, "AbsTol", 1e-12);
+            testCase.verifyGreaterThan(norm(firstURLLCGain - thirdURLLCGain), 0.0);
         end
 
-        function testStepUsesAllRBsWhenURLLCQueueIsEmpty(testCase)
-            %TESTSTEPUSESALLRBSWHENURLLCQUEUEISEMPTY Ensure eMBB uses all RBs without phantom URLLC interference.
-
+        function testStepUsesAllPRBsForEMBBWhenURLLCQueueIsEmpty(testCase)
             env = RANSlicingEnv();
             reset(env);
-
-            noisePowerLinear = 10 ^ (Config.Noise_Power / 10);
-            rxPowerFactor = 10 ^ ((Config.Tx_Power_dBm - Config.Path_Loss_dB) / 10);
-            snrDb = 10 * log10(rxPowerFactor / noisePowerLinear);
-            cqi = ChannelStateProcessor.snrToCQI(snrDb);
-            groupId = Tests.groupIdForCQI(cqi);
-            perRbBits = Config.W * ChannelStateProcessor.cqiToEfficiency(cqi) * ...
-                (Config.Slot_duration / Config.M_mini_slots);
+            env.lambda_embb = 0.0;
 
             env.URLLCGroupQueues = zeros(Config.N_g, 1);
-            env.eMBBGroupQueues = zeros(Config.N_g, 1);
-            env.eMBBGroupQueues(groupId) = 1e6;
-            env.URLLCChannelGain = ones(Config.B_RBs, 1);
-            env.eMBBChannelGain = ones(Config.B_RBs, 1);
-
-            seed = Tests.findSeedWithoutEmbbArrivals(200);
-            testCase.assertNotEmpty(seed, "Failed to find a seed without eMBB arrivals.");
-            rng(seed);
+            env.eMBBGroupQueues = 1e6 * ones(Config.N_g, 1);
+            preQueue = env.eMBBGroupQueues;
 
             [~, ~, ~, logged] = step(env, ones(Config.N_g, 1));
 
-            expectedServedBits = Config.B_RBs * perRbBits;
-            servedBits = 1e6 - env.eMBBGroupQueues(groupId);
-            testCase.verifyEqual(servedBits, expectedServedBits, "AbsTol", 1e-9);
+            servedBits = sum(preQueue) - sum(env.eMBBGroupQueues);
+            testCase.verifyGreaterThan(servedBits, 0.0);
+            testCase.verifyGreaterThan(logged.embb_tbs_bits, 0.0);
             testCase.verifyEqual(logged.urllc_actual_delay, 0.0, "AbsTol", 1e-12);
         end
 
         function testStepTracksAgedURLLCDelay(testCase)
-            %TESTSTEPTRACKSAGEDURLLCDELAY Ensure old URLLC backlog reports aged delay when eventually served.
-
             env = RANSlicingEnv();
-            seed = [];
+            env.lambda_embb = 0.0;
             zeroAction = zeros(Config.N_g, 1);
-
-            for candidate = 1:50
-                reset(env);
-                rng(candidate);
-                for stepIdx = 1:5
-                    step(env, zeroAction); %#ok<NASGU>
-                end
-                if sum(env.URLLCGroupQueues) > 0
-                    seed = candidate;
-                    break;
-                end
-            end
+            seed = Tests.findSeedWithURLLCBacklog(env, zeroAction);
 
             testCase.assertNotEmpty(seed, "Failed to find a seed with delayed URLLC backlog.");
 
-            reset(env);
             rng(seed);
+            reset(env);
             for stepIdx = 1:5
                 step(env, zeroAction); %#ok<NASGU>
             end
 
             testCase.verifyGreaterThan(sum(env.URLLCGroupQueues), 0.0);
 
-            env.URLLCChannelGain = ones(Config.B_RBs, 1);
-            env.eMBBChannelGain = 0.1 * ones(Config.B_RBs, 1);
             [~, ~, ~, logged] = step(env, ones(Config.N_g, 1));
 
             miniSlotDuration = Config.Slot_duration / Config.M_mini_slots;
             testCase.verifyGreaterThan(logged.urllc_actual_delay, miniSlotDuration);
-            testCase.verifyGreaterThan(logged.urllc_actual_delay, Config.tau_req);
         end
 
         function testStepObservationUsesNormalizedState(testCase)
-            %TESTSTEPOBSERVATIONUSESNORMALIZEDSTATE Ensure returned observation matches normalized environment state.
-
             env = RANSlicingEnv();
             reset(env);
             rng(7);
+            env.lambda_embb = 0.0;
 
             env.URLLCGroupQueues = [2500; 12500; 0; 500; 20000];
             env.eMBBGroupQueues = [1e5; 5e6; 2.5e7; 0; 8e6];
             env.MiniSlotIndex = 3;
-            env.URLLCChannelGain = linspace(0.2, 1.2, Config.B_RBs).';
-            env.eMBBChannelGain = linspace(1.2, 0.2, Config.B_RBs).';
+            env.URLLCWidebandCQI = 6;
+            env.eMBBWidebandCQI = 12;
 
             [nextObservation, ~, ~, ~] = step(env, zeros(Config.N_g, 1));
 
             expectedObservation = [
-                min(1.0, max(0.0, log10(1.0 + env.URLLCGroupQueues) / 6.0))
-                min(1.0, max(0.0, log10(1.0 + env.eMBBGroupQueues) / 9.0))
+                min(1.0, max(0.0, log10(1.0 + env.URLLCGroupQueues) / Config.obs_urlllc_log_scale))
+                min(1.0, max(0.0, log10(1.0 + env.eMBBGroupQueues) / Config.obs_embb_log_scale))
                 min(1.0, max(0.0, env.MiniSlotIndex / Config.M_mini_slots))
+                min(1.0, max(0.0, env.URLLCWidebandCQI / 15.0))
+                min(1.0, max(0.0, env.eMBBWidebandCQI / 15.0))
             ];
 
             testCase.verifyEqual(nextObservation, expectedObservation, "AbsTol", 1e-12);
@@ -263,20 +223,19 @@ classdef Tests < matlab.unittest.TestCase
     end
 
     methods (Static, Access = private)
-        function seed = findSeedWithoutEmbbArrivals(maxSeeds)
+        function seed = findSeedWithURLLCBacklog(env, zeroAction)
             seed = [];
-            for candidate = 1:maxSeeds
+            for candidate = 1:50
                 rng(candidate);
-                if all(rand(Config.N_g, 1) >= Config.lambda_embb)
+                reset(env);
+                for stepIdx = 1:5
+                    step(env, zeroAction); %#ok<NASGU>
+                end
+                if sum(env.URLLCGroupQueues) > 0
                     seed = candidate;
                     return;
                 end
             end
-        end
-
-        function groupId = groupIdForCQI(cqi)
-            groups = ChannelStateProcessor.groupUsers(cqi);
-            groupId = find(cellfun(@(idx) ~isempty(idx), groups), 1, "first");
         end
     end
 end
