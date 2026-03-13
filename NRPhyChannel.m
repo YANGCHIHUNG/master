@@ -77,11 +77,25 @@ classdef NRPhyChannel < handle
             this.resetEpisode(Config.channel_seed_base);
         end
 
-        function resetEpisode(this, episodeSeed)
+        function resetEpisode(this, seedOrStream)
             %RESETEPISODE Reset fading/channel states for a new RL episode.
 
-            seedValue = max(0, round(double(episodeSeed)));
-            this.LocalRandStream = RandStream("mt19937ar", "Seed", seedValue);
+            % Accept either a numeric seed or a RandStream.
+            if nargin < 2 || isempty(seedOrStream)
+                seedValue = Config.channel_seed_base;
+                this.LocalRandStream = RandStream("mt19937ar", "Seed", seedValue);
+            elseif isa(seedOrStream, 'RandStream')
+                this.LocalRandStream = seedOrStream;
+                try
+                    seedValue = this.LocalRandStream.Seed;
+                catch
+                    seedValue = Config.channel_seed_base;
+                end
+            else
+                seedValue = max(0, round(double(seedOrStream)));
+                this.LocalRandStream = RandStream("mt19937ar", "Seed", seedValue);
+            end
+
             release(this.URLLCChannel);
             release(this.EMBBChannel);
             this.URLLCChannel.Seed = seedValue + 1;

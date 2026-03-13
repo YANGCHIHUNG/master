@@ -37,6 +37,10 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
 
         % Historical eMBB rates used by reward/stability, reset each episode.
         eMBBRateHistory
+        % Local random stream for deterministic sampling (seed-injectable)
+        LocalRandStream
+        % Last reset seed (numeric) for metadata and reproducibility
+        LastResetSeed (1,1) double = NaN
     end
 
     properties (Access = private)
@@ -50,7 +54,7 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
     end
 
     methods
-        function this = RANSlicingEnv()
+    function this = RANSlicingEnv()
             %RANSLICINGENV Construct environment with action/observation specs.
             %   Action:
             %   - [Config.N_g x 1], continuous in [0, 1], representing
@@ -81,16 +85,36 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
             this.GlobalStepIndex = 0;
 
             % Initialize state for a fresh episode.
+            % Call reset without seed: will initialize LocalRandStream from global RNG
             this.Observation = reset(this);
         end
 
-        function initialObservation = reset(this)
+        function initialObservation = reset(this, optionalSeedOrStream)
             %RESET Start a new NR slot episode using a fresh PHY realization.
             %   initialObservation = reset(this)
             %
             %   Output:
             %   - initialObservation: [13 x 1] normalized column vector
             %     [u_G1..u_G5, e_G1..e_G5, m, cqi_u, cqi_e]^T.
+
+            % Handle optional seed or RandStream for deterministic resets.
+            if nargin < 2 || isempty(optionalSeedOrStream)
+                % Backwards compatible: draw an episode seed from global RNG
+                episodeSeed = randi([0, 2^31 - 1]);
+                this.LocalRandStream = RandStream("mt19937ar", "Seed", episodeSeed);
+                this.LastResetSeed = episodeSeed;
+            elseif isa(optionalSeedOrStream, 'RandStream')
+                this.LocalRandStream = optionalSeedOrStream;
+                try
+                    this.LastResetSeed = this.LocalRandStream.Seed;
+                catch
+                    this.LastResetSeed = NaN;
+                end
+            else
+                seedValue = max(0, round(double(optionalSeedOrStream)));
+                this.LocalRandStream = RandStream("mt19937ar", "Seed", seedValue);
+                this.LastResetSeed = seedValue;
+            end
 
             this.URLLCGroupQueues = zeros(Config.N_g, 1);
             this.eMBBGroupQueues = zeros(Config.N_g, 1);
@@ -101,7 +125,13 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
             this.URLLCPacketBits = cell(Config.N_g, 1);
             this.URLLCPacketArrivalSteps = cell(Config.N_g, 1);
 
-            this.PhyChannel.resetEpisode(randi([0, 2^31 - 1]));
+            % Pass a numeric seed to the PHY (prefer numeric seed for 5G Toolbox compatibility)
+            phySeed = this.LastResetSeed;
+            if isempty(phySeed) || isnan(phySeed)
+                phySeed = this.LocalRandStream.Seed;
+            end
+
+            this.PhyChannel.resetEpisode(phySeed);
             initialMetrics = this.PhyChannel.stepChannel( ...
                 1, ...
                 this.MiniSlotIndex, ...
@@ -150,11 +180,14 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
             this.ensureURLLCPacketState();
 
             % 3GPP FTP3 bursty traffic arrivals for eMBB groups.
+            % Use LocalRandStream for deterministic sampling when available.
+            draws = this.LocalRandStream.rand(Config.N_g, 1);
             for groupId = 1:Config.N_g
-                if rand() < this.lambda_embb
+                if draws(groupId) < this.lambda_embb
                     fileSizeBits = this.sampleParetoBits( ...
                         Config.embb_xm_bits, ...
-                        Config.embb_alpha);
+                        Config.embb_alpha, ...
+                        this.LocalRandStream);
                     this.eMBBGroupQueues(groupId) = ...
                         this.eMBBGroupQueues(groupId) + fileSizeBits;
                 end
@@ -249,7 +282,7 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
                 "urllc_tbs_bits", sum(phyMetrics.groupURLLCTBSBits), ...
                 "embb_tbs_bits", sum(phyMetrics.groupEMBBTBSBits));
 
-            newURLLCPackets = this.samplePoisson(Config.lambda_urllc, Config.N_g, 1);
+            newURLLCPackets = this.samplePoisson(Config.lambda_urllc, Config.N_g, 1, this.LocalRandStream);
             this.addURLLCPackets(newURLLCPackets, currentServiceStep + 1);
 
             isDone = this.CurrentStep >= Config.Max_Episode_Steps;
@@ -413,18 +446,21 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
     end
 
     methods (Static, Access = private)
-        function sample = sampleParetoBits(xm, alpha)
+        function sample = sampleParetoBits(xm, alpha, randStream)
             if xm <= 0 || alpha <= 0
                 error("RANSlicingEnv:InvalidParetoParameters", ...
                     "Pareto parameters xm and alpha must be positive.");
             end
-
-            uniformSample = max(rand(), eps);
+            if nargin >= 3 && isa(randStream, 'RandStream')
+                uniformSample = max(randStream.rand(), eps);
+            else
+                uniformSample = max(rand(), eps);
+            end
             sample = xm / (uniformSample ^ (1 / alpha));
             sample = min(sample, 200e6);
         end
 
-        function samples = samplePoisson(lambda, rows, cols)
+        function samples = samplePoisson(lambda, rows, cols, randStream)
             if exist("poissrnd", "file") == 2
                 samples = poissrnd(lambda, rows, cols);
                 return;
@@ -442,7 +478,11 @@ classdef RANSlicingEnv < rl.env.MATLABEnvironment
                 p = 1.0;
                 while p > threshold
                     k = k + 1;
-                    p = p * rand();
+                    if nargin >= 4 && isa(randStream, 'RandStream')
+                        p = p * randStream.rand();
+                    else
+                        p = p * rand();
+                    end
                 end
                 samples(sampleIdx) = k - 1;
             end

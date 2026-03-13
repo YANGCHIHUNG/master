@@ -136,18 +136,13 @@ classdef Tests < matlab.unittest.TestCase
         function testResetProducesDeterministicPhyStateForFixedSeed(testCase)
             env = RANSlicingEnv();
 
-            rng(11);
-            reset(env);
+            reset(env, 11);
             firstURLLCGain = env.URLLCChannelGain;
             firstEMBBCQI = env.eMBBPRBCQI;
-
-            rng(11);
-            reset(env);
+            reset(env, 11);
             secondURLLCGain = env.URLLCChannelGain;
             secondEMBBCQI = env.eMBBPRBCQI;
-
-            rng(23);
-            reset(env);
+            reset(env, 23);
             thirdURLLCGain = env.URLLCChannelGain;
 
             testCase.verifyEqual(firstURLLCGain, secondURLLCGain, "AbsTol", 1e-12);
@@ -180,8 +175,7 @@ classdef Tests < matlab.unittest.TestCase
 
             testCase.assertNotEmpty(seed, "Failed to find a seed with delayed URLLC backlog.");
 
-            rng(seed);
-            reset(env);
+            reset(env, seed);
             for stepIdx = 1:5
                 step(env, zeroAction); %#ok<NASGU>
             end
@@ -196,8 +190,7 @@ classdef Tests < matlab.unittest.TestCase
 
         function testStepObservationUsesNormalizedState(testCase)
             env = RANSlicingEnv();
-            reset(env);
-            rng(7);
+            reset(env, 7);
             env.lambda_embb = 0.0;
 
             env.URLLCGroupQueues = [2500; 12500; 0; 500; 20000];
@@ -226,8 +219,7 @@ classdef Tests < matlab.unittest.TestCase
         function seed = findSeedWithURLLCBacklog(env, zeroAction)
             seed = [];
             for candidate = 1:50
-                rng(candidate);
-                reset(env);
+                reset(env, candidate);
                 for stepIdx = 1:5
                     step(env, zeroAction); %#ok<NASGU>
                 end

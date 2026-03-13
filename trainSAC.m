@@ -178,6 +178,18 @@ fprintf('Calling train(agent, env, trainOpts) at %s\n', ...
 trainingStats = train(agent, env, trainOpts);
 save(fullfile(saveDir, "trainingStats.mat"), "trainingStats");
 
+% Save training metadata for reproducibility: Config snapshot, seed, and MATLAB/toolbox info
+metadata = struct();
+metadata.Config = Config; %#ok<NASGU>
+metadata.random_seed = Config.random_seed;
+metadata.datetime = char(datetime("now", "Format", "yyyy-MM-dd HH:mm:ss"));
+try
+    metadata.matlab_ver = ver();
+catch
+    metadata.matlab_ver = [];
+end
+save(fullfile(saveDir, "training_metadata.mat"), "metadata");
+
 printSectionHeader("TRAINING SUMMARY");
 fprintf('trainingStats saved to      : %s\n', fullfile(saveDir, "trainingStats.mat"));
 summarizeTrainingStats(trainingStats);
